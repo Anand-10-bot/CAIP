@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from caip_responses.models.request import CreateResponseRequest
 from caip_responses.providers.gemini_provider import GeminiProvider
 
 
@@ -60,6 +63,29 @@ class TestGeminiTranslation:
         assert contents[1]["parts"][0]["function_call"]["name"] == "get_weather"
         assert contents[2]["role"] == "user"
         assert "function_response" in contents[2]["parts"][0]
+        # function_response.name must be the function name, NOT the call_id
+        assert contents[2]["parts"][0]["function_response"]["name"] == "get_weather"
+
+    def test_translate_input_function_response_uses_name_not_call_id(self):
+        """Gemini requires function name in function_response, not call_id."""
+        provider = self._make_provider()
+        contents = provider._translate_input([
+            {
+                "type": "function_call",
+                "call_id": "call_abc123",
+                "name": "search_db",
+                "arguments": '{"query": "test"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_abc123",
+                "output": '{"results": []}',
+            },
+        ])
+        assert len(contents) == 2
+        fr = contents[1]["parts"][0]["function_response"]
+        assert fr["name"] == "search_db"  # must be function name
+        assert fr["name"] != "call_abc123"  # must NOT be call_id
 
     def test_translate_input_skips_system(self):
         provider = self._make_provider()
@@ -267,3 +293,315 @@ class TestGeminiTranslation:
         assert response.model == "gemini-2.0-flash"
         assert response.output == []
         assert response.usage is None
+
+    def test_convert_response_thinking(self):
+        """Gemini 2.0+ thinking parts become reasoning items."""
+        provider = self._make_provider()
+
+        mock_thinking = MagicMock()
+        mock_thinking.thought = True
+        mock_thinking.text = "Let me think..."
+        mock_thinking.function_call = None
+
+        mock_text = MagicMock()
+        mock_text.thought = None
+        mock_text.text = "The answer is 42."
+        mock_text.function_call = None
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_thinking, mock_text]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+
+        mock_result = MagicMock()
+        mock_result.candidates = [mock_candidate]
+        mock_result.usage_metadata = MagicMock()
+        mock_result.usage_metadata.prompt_token_count = 20
+        mock_result.usage_metadata.candidates_token_count = 30
+
+        response = provider._convert_response(mock_result, "gemini-2.0-flash")
+
+        reasoning_items = [
+            i for i in response.output
+            if isinstance(i, dict) and i.get("type") == "reasoning"
+        ]
+        assert len(reasoning_items) == 1
+        assert response.output_text == "The answer is 42."
+
+    def test_build_kwargs_with_json_schema(self):
+        """JSON schema in text config is injected into system prompt."""
+        provider = self._make_provider()
+        request = CreateResponseRequest(
+            model="gemini-2.0-flash",
+            input="Give me data",
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                    },
+                }
+            },
+        )
+        kwargs = provider._build_kwargs(request)
+
+        assert "system_instruction" in kwargs.get("config", {})
+        assert "JSON" in kwargs["config"]["system_instruction"]
+
+    def test_supports_tool(self):
+        provider = self._make_provider()
+        assert provider.supports_tool("function") is True
+        assert provider.supports_tool("web_search") is False
+
+    def test_supports_reasoning(self):
+        provider = self._make_provider()
+        assert provider.supports_reasoning() is True
+
+    def test_provider_name(self):
+        provider = self._make_provider()
+        assert provider.provider_name == "gemini"
+
+
+class TestGeminiCreateResponse:
+    """Test create_response with mocked SDK calls."""
+
+    def _make_provider(self) -> GeminiProvider:
+        provider = GeminiProvider.__new__(GeminiProvider)
+        provider._client = MagicMock()
+        return provider
+
+    def _make_text_result(self, text: str) -> MagicMock:
+        mock_text_part = MagicMock()
+        mock_text_part.text = text
+        mock_text_part.function_call = None
+        mock_text_part.thought = None
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_text_part]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+
+        mock_result = MagicMock()
+        mock_result.candidates = [mock_candidate]
+        mock_result.usage_metadata = MagicMock()
+        mock_result.usage_metadata.prompt_token_count = 10
+        mock_result.usage_metadata.candidates_token_count = 8
+
+        return mock_result
+
+    @pytest.mark.asyncio
+    async def test_create_response_text(self):
+        provider = self._make_provider()
+        mock_result = self._make_text_result("Hello from Gemini!")
+        provider._client.aio.models.generate_content = AsyncMock(return_value=mock_result)
+
+        request = CreateResponseRequest(model="gemini-2.0-flash", input="Hello")
+        response = await provider.create_response(request)
+
+        assert response.output_text == "Hello from Gemini!"
+        assert response.usage.input_tokens == 10
+        assert response.usage.output_tokens == 8
+
+    @pytest.mark.asyncio
+    async def test_create_response_function_call(self):
+        provider = self._make_provider()
+
+        mock_fc = MagicMock()
+        mock_fc.name = "get_weather"
+        mock_fc.args = {"city": "London"}
+
+        mock_fc_part = MagicMock()
+        mock_fc_part.text = None
+        mock_fc_part.function_call = mock_fc
+        mock_fc_part.thought = None
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_fc_part]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+
+        mock_result = MagicMock()
+        mock_result.candidates = [mock_candidate]
+        mock_result.usage_metadata = MagicMock()
+        mock_result.usage_metadata.prompt_token_count = 15
+        mock_result.usage_metadata.candidates_token_count = 12
+
+        provider._client.aio.models.generate_content = AsyncMock(return_value=mock_result)
+
+        request = CreateResponseRequest(
+            model="gemini-2.0-flash",
+            input="What's the weather in London?",
+            tools=[{"type": "function", "name": "get_weather", "parameters": {}}],
+        )
+        response = await provider.create_response(request)
+
+        assert response.has_function_calls is True
+        fc = response.function_calls[0]
+        assert fc.name == "get_weather"
+        assert json.loads(fc.arguments) == {"city": "London"}
+
+    @pytest.mark.asyncio
+    async def test_create_response_wraps_genai_error(self):
+        """google-genai errors are wrapped in ProviderError."""
+        provider = self._make_provider()
+
+        class FakeGenaiError(Exception):
+            __module__ = "google.genai.errors"
+            code = 429
+
+        provider._client.aio.models.generate_content = AsyncMock(side_effect=FakeGenaiError("quota"))
+
+        from caip_responses.models.errors import ProviderError
+        request = CreateResponseRequest(model="gemini-2.0-flash", input="Hello")
+
+        with pytest.raises(ProviderError) as exc_info:
+            await provider.create_response(request)
+
+        assert exc_info.value.provider == "gemini"
+
+
+class TestGeminiStreaming:
+    """Test streaming with mocked Gemini SDK."""
+
+    def _make_provider(self) -> GeminiProvider:
+        provider = GeminiProvider.__new__(GeminiProvider)
+        provider._client = MagicMock()
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_stream_text_response(self):
+        """Streaming a simple text response produces the canonical event sequence."""
+        provider = self._make_provider()
+
+        # Create async chunks
+        async def mock_stream():
+            # Chunk 1: partial text
+            chunk1 = MagicMock()
+            part1 = MagicMock()
+            part1.text = "Hello "
+            part1.function_call = None
+            part1.thought = None
+            candidate1 = MagicMock()
+            candidate1.content = MagicMock()
+            candidate1.content.parts = [part1]
+            chunk1.candidates = [candidate1]
+            chunk1.usage_metadata = None
+            yield chunk1
+
+            # Chunk 2: more text + usage
+            chunk2 = MagicMock()
+            part2 = MagicMock()
+            part2.text = "world!"
+            part2.function_call = None
+            part2.thought = None
+            candidate2 = MagicMock()
+            candidate2.content = MagicMock()
+            candidate2.content.parts = [part2]
+            chunk2.candidates = [candidate2]
+            chunk2.usage_metadata = MagicMock()
+            chunk2.usage_metadata.prompt_token_count = 5
+            chunk2.usage_metadata.candidates_token_count = 3
+            yield chunk2
+
+        provider._client.aio.models.generate_content_stream = AsyncMock(return_value=mock_stream())
+
+        request = CreateResponseRequest(model="gemini-2.0-flash", input="Hi")
+        events = []
+        async for event in provider.create_response_stream(request):
+            events.append(event)
+
+        event_types = [e.type for e in events]
+
+        # Canonical sequence
+        assert event_types[0] == "response.created"
+        assert event_types[1] == "response.in_progress"
+        assert "response.output_item.added" in event_types
+        assert "response.content_part.added" in event_types
+        assert "response.output_text.delta" in event_types
+        assert "response.output_text.done" in event_types
+        assert "response.content_part.done" in event_types
+        assert "response.output_item.done" in event_types
+        assert event_types[-1] == "response.completed"
+
+        # Text deltas
+        text_deltas = [e.delta for e in events if e.type == "response.output_text.delta"]
+        assert "".join(text_deltas) == "Hello world!"
+
+        # Usage in completed event
+        completed = [e for e in events if e.type == "response.completed"][0]
+        assert completed.response["usage"]["input_tokens"] == 5
+        assert completed.response["usage"]["output_tokens"] == 3
+
+    @pytest.mark.asyncio
+    async def test_stream_function_call(self):
+        """Streaming a function call produces function_call events."""
+        provider = self._make_provider()
+
+        async def mock_stream():
+            chunk = MagicMock()
+            fc = MagicMock()
+            fc.name = "search"
+            fc.args = {"q": "test"}
+
+            part = MagicMock()
+            part.text = None
+            part.function_call = fc
+            part.thought = None
+
+            candidate = MagicMock()
+            candidate.content = MagicMock()
+            candidate.content.parts = [part]
+            chunk.candidates = [candidate]
+            chunk.usage_metadata = MagicMock()
+            chunk.usage_metadata.prompt_token_count = 10
+            chunk.usage_metadata.candidates_token_count = 5
+            yield chunk
+
+        provider._client.aio.models.generate_content_stream = AsyncMock(return_value=mock_stream())
+
+        request = CreateResponseRequest(model="gemini-2.0-flash", input="Search")
+        events = []
+        async for event in provider.create_response_stream(request):
+            events.append(event)
+
+        event_types = [e.type for e in events]
+        assert "response.output_item.added" in event_types
+        assert "response.function_call_arguments.delta" in event_types
+        assert "response.function_call_arguments.done" in event_types
+        assert "response.output_item.done" in event_types
+
+        # Verify function call data
+        added = [e for e in events if e.type == "response.output_item.added"][0]
+        assert added.item["type"] == "function_call"
+        assert added.item["name"] == "search"
+
+        args_done = [e for e in events if e.type == "response.function_call_arguments.done"][0]
+        assert json.loads(args_done.delta) == {"q": "test"}
+
+    @pytest.mark.asyncio
+    async def test_stream_empty_candidates(self):
+        """Chunks with no candidates are skipped gracefully."""
+        provider = self._make_provider()
+
+        async def mock_stream():
+            chunk = MagicMock()
+            chunk.candidates = []
+            chunk.usage_metadata = None
+            yield chunk
+
+        provider._client.aio.models.generate_content_stream = AsyncMock(return_value=mock_stream())
+
+        request = CreateResponseRequest(model="gemini-2.0-flash", input="Hi")
+        events = []
+        async for event in provider.create_response_stream(request):
+            events.append(event)
+
+        event_types = [e.type for e in events]
+        assert "response.created" in event_types
+        assert "response.completed" in event_types
+        # No text or function call events
+        assert "response.output_text.delta" not in event_types

@@ -15,6 +15,10 @@ from caip_responses.plugins.manager import PluginManager
 from caip_responses.providers.base import BaseProvider
 from caip_responses.ratelimit.limiter import RateLimiter
 from caip_responses.store.conversation_store import ConversationStore
+from caip_responses.tool_handlers.code_interpreter import CodeExecutorCallback
+from caip_responses.tool_handlers.registry import BuiltinToolRegistry
+from caip_responses.tool_handlers.shell import ShellExecutorCallback
+from caip_responses.tool_handlers.web_search import SearchCallback
 
 
 class _SyncResponsesNamespace:
@@ -136,6 +140,21 @@ class Client:
         cache_ttl: int = 3600,
         enable_cache: bool = True,
         discover_plugins: bool = True,
+        # Built-in tool handler configuration
+        web_search_model: str = "gpt-4.1-nano",
+        web_search_callback: SearchCallback | None = None,
+        code_interpreter_enabled: bool = False,
+        code_interpreter_timeout: int = 30,
+        code_interpreter_working_dir: str | None = None,
+        code_interpreter_callback: CodeExecutorCallback | None = None,
+        shell_enabled: bool = False,
+        shell_timeout: int = 30,
+        shell_working_dir: str | None = None,
+        shell_callback: ShellExecutorCallback | None = None,
+        builtin_registry: BuiltinToolRegistry | None = None,
+        # Redis (for persistent conversation store + cache)
+        redis_url: str | None = None,
+        conversation_ttl: int = 86400,
     ) -> None:
         self._async_client = AsyncClient(
             openai_api_key=openai_api_key,
@@ -152,6 +171,19 @@ class Client:
             cache_ttl=cache_ttl,
             enable_cache=enable_cache,
             discover_plugins=discover_plugins,
+            web_search_model=web_search_model,
+            web_search_callback=web_search_callback,
+            code_interpreter_enabled=code_interpreter_enabled,
+            code_interpreter_timeout=code_interpreter_timeout,
+            code_interpreter_working_dir=code_interpreter_working_dir,
+            code_interpreter_callback=code_interpreter_callback,
+            shell_enabled=shell_enabled,
+            shell_timeout=shell_timeout,
+            shell_working_dir=shell_working_dir,
+            shell_callback=shell_callback,
+            builtin_registry=builtin_registry,
+            redis_url=redis_url,
+            conversation_ttl=conversation_ttl,
         )
         self._responses = _SyncResponsesNamespace(self._async_client)
 
@@ -188,6 +220,21 @@ class Client:
     def plugins(self) -> PluginManager:
         """Access the plugin manager to register custom providers."""
         return self._async_client.plugins
+
+    @property
+    def builtin_tools(self) -> BuiltinToolRegistry:
+        """Access the builtin tool registry."""
+        return self._async_client.builtin_tools
+
+    @property
+    def web_search_metrics(self):
+        """Token usage metrics from web search calls."""
+        return self._async_client.web_search_metrics
+
+    @property
+    def delegated_tool_metrics(self):
+        """Token usage metrics for all tools delegated to Azure OpenAI."""
+        return self._async_client.delegated_tool_metrics
 
     def close(self) -> None:
         loop = asyncio.new_event_loop()

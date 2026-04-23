@@ -67,7 +67,7 @@ class GeminiProvider(BaseProvider):
             result = await self._client.aio.models.generate_content(**kwargs)
             return self._convert_response(result, request.model)
         except Exception as e:
-            if genai and _is_genai_error(e):
+            if _is_genai_error(e):
                 raise ProviderError(
                     str(e),
                     provider="gemini",
@@ -168,6 +168,34 @@ class GeminiProvider(BaseProvider):
                             seq += 1
                             current_item_index += 1
 
+                        # Thought / reasoning — check before text because
+                        # thinking parts also have a .text attribute.
+                        elif hasattr(part, "thought") and part.thought:
+                            reasoning_text = getattr(part, "text", "") or ""
+                            reasoning_id = generate_item_id()
+                            yield StreamEvent(
+                                type="response.output_item.added",
+                                sequence_number=seq,
+                                output_index=current_item_index,
+                                item={"type": "reasoning", "id": reasoning_id},
+                            )
+                            seq += 1
+                            if reasoning_text:
+                                yield StreamEvent(
+                                    type="response.reasoning_text.delta",
+                                    sequence_number=seq,
+                                    output_index=current_item_index,
+                                    delta=reasoning_text,
+                                )
+                                seq += 1
+                            yield StreamEvent(
+                                type="response.output_item.done",
+                                sequence_number=seq,
+                                output_index=current_item_index,
+                            )
+                            seq += 1
+                            current_item_index += 1
+
                         # Text part
                         elif hasattr(part, "text") and part.text is not None:
                             text = part.text
@@ -243,7 +271,7 @@ class GeminiProvider(BaseProvider):
             )
 
         except Exception as e:
-            if genai and _is_genai_error(e):
+            if _is_genai_error(e):
                 raise ProviderError(
                     str(e),
                     provider="gemini",
@@ -341,6 +369,10 @@ class GeminiProvider(BaseProvider):
             return [{"role": "user", "parts": [{"text": input_data}]}]
 
         contents: list[dict[str, Any]] = []
+        # Track call_id → function name so function_call_output can use the
+        # correct name (Gemini requires the function name, not the call_id).
+        call_id_to_name: dict[str, str] = {}
+
         for item in input_data:
             if not isinstance(item, dict):
                 continue
@@ -379,6 +411,10 @@ class GeminiProvider(BaseProvider):
 
             # Function call → model turn with function_call part
             elif item_type == "function_call":
+                fn_name = item.get("name", "")
+                call_id = item.get("call_id", "")
+                if call_id and fn_name:
+                    call_id_to_name[call_id] = fn_name
                 try:
                     args = json.loads(item.get("arguments", "{}"))
                 except json.JSONDecodeError:
@@ -387,7 +423,7 @@ class GeminiProvider(BaseProvider):
                     "role": "model",
                     "parts": [{
                         "function_call": {
-                            "name": item.get("name", ""),
+                            "name": fn_name,
                             "args": args,
                         },
                     }],
@@ -395,6 +431,8 @@ class GeminiProvider(BaseProvider):
 
             # Function call output → user turn with function_response part
             elif item_type == "function_call_output":
+                call_id = item.get("call_id", "")
+                fn_name = call_id_to_name.get(call_id, call_id or "function")
                 output = item.get("output", "")
                 try:
                     response_data = json.loads(output)
@@ -404,7 +442,7 @@ class GeminiProvider(BaseProvider):
                     "role": "user",
                     "parts": [{
                         "function_response": {
-                            "name": item.get("call_id", "function"),
+                            "name": fn_name,
                             "response": response_data,
                         },
                     }],
@@ -482,20 +520,21 @@ class GeminiProvider(BaseProvider):
                         "arguments": fn_args,
                     })
 
+                # Thought / reasoning (Gemini 2.0+ thinking) — check before
+                # text because thinking parts also have a .text attribute.
+                elif hasattr(part, "thought") and part.thought:
+                    output_items.append({
+                        "type": "reasoning",
+                        "id": generate_item_id(),
+                        "summary": [{"type": "text", "text": part.text or ""}] if hasattr(part, "text") and part.text else None,
+                    })
+
                 # Text
                 elif hasattr(part, "text") and part.text is not None:
                     text_parts.append({
                         "type": "output_text",
                         "text": part.text,
                         "annotations": [],
-                    })
-
-                # Thought / reasoning (Gemini 2.0+ thinking)
-                elif hasattr(part, "thought") and part.thought:
-                    output_items.append({
-                        "type": "reasoning",
-                        "id": generate_item_id(),
-                        "summary": [{"type": "text", "text": part.text or ""}] if hasattr(part, "text") and part.text else None,
                     })
 
         # Flush remaining text

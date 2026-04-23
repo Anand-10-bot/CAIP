@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -126,35 +127,40 @@ class AgentLoop:
     async def _execute_function_calls(
         self, fc_items: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Execute function calls: builtin handlers first, then user handlers."""
-        outputs: list[dict[str, Any]] = []
+        """Execute function calls in parallel: builtin handlers and user handlers.
 
-        for fc in fc_items:
+        All function calls are dispatched concurrently via asyncio.gather.
+        Results are returned in the same order as the input fc_items.
+        """
+        if not fc_items:
+            return []
+
+        async def _execute_single(fc: dict[str, Any]) -> dict[str, Any]:
             fn_name = fc.get("name", "")
             handler = self._builtin.resolve_for_function(fn_name)
 
             if handler is not None:
-                # Builtin tool handler
                 try:
                     args = json.loads(fc.get("arguments", "{}"))
                 except json.JSONDecodeError:
                     args = {}
                 result = await handler.execute(fn_name, args)
-                outputs.append({
+                return {
                     "type": "function_call_output",
                     "call_id": fc.get("call_id", ""),
                     "output": result,
-                })
+                }
             else:
-                # User handler via ToolExecutor
-                result = await self._executor.execute(
+                return await self._executor.execute(
                     call_id=fc.get("call_id", ""),
                     name=fn_name,
                     arguments=fc.get("arguments", "{}"),
                 )
-                outputs.append(result)
 
-        return outputs
+        results = await asyncio.gather(
+            *(_execute_single(fc) for fc in fc_items)
+        )
+        return list(results)
 
     # ------------------------------------------------------------------
     # Internal helpers
