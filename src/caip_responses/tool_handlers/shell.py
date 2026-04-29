@@ -2,11 +2,39 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
+import shlex
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from caip_responses.tool_handlers.base import BuiltinToolHandler
 from caip_responses.utils.id_gen import generate_item_id
+
+logger = logging.getLogger(__name__)
+
+# Default set of safe commands allowed when no custom allowlist is provided.
+# Callers should provide their own allowlist for production use.
+DEFAULT_COMMAND_ALLOWLIST: frozenset[str] = frozenset({
+    "cat",
+    "date",
+    "df",
+    "du",
+    "echo",
+    "env",
+    "find",
+    "grep",
+    "head",
+    "hostname",
+    "ls",
+    "pwd",
+    "tail",
+    "uname",
+    "wc",
+    "which",
+    "whoami",
+})
 
 # Type for a pluggable shell executor:
 #   async def my_executor(command: str) -> dict
@@ -24,11 +52,19 @@ class ShellHandler(BuiltinToolHandler):
     configurable timeout and working directory.
 
     **Security**: Disabled by default.  Must be explicitly enabled.
+    When enabled, commands are validated against an allowlist before
+    execution.  Every command attempt (allowed or denied) is audit-logged.
 
     Usage::
 
         handler = ShellHandler(enabled=True, timeout=30)
         registry.register(handler)
+
+        # Custom allowlist:
+        handler = ShellHandler(
+            enabled=True,
+            command_allowlist={"ls", "cat", "grep", "python"},
+        )
     """
 
     def __init__(
@@ -38,11 +74,17 @@ class ShellHandler(BuiltinToolHandler):
         timeout: int = 30,
         working_dir: str | None = None,
         executor_callback: ShellExecutorCallback | None = None,
+        command_allowlist: set[str] | frozenset[str] | None = None,
     ) -> None:
         self._enabled = enabled
         self._timeout = timeout
         self._working_dir = working_dir
         self._executor_callback = executor_callback
+        self._command_allowlist: frozenset[str] = (
+            frozenset(command_allowlist)
+            if command_allowlist is not None
+            else DEFAULT_COMMAND_ALLOWLIST
+        )
 
     def tool_type(self) -> str:
         return "shell"
@@ -96,6 +138,34 @@ class ShellHandler(BuiltinToolHandler):
         if not command:
             return json.dumps({"error": "No command provided"})
 
+        # --- Allowlist validation ---
+        allowed, base_command = self._is_command_allowed(command)
+        timestamp = datetime.now(UTC).isoformat()
+
+        if not allowed:
+            logger.warning(
+                "Shell command DENIED: command=%r base_command=%r "
+                "timestamp=%s allowlist=%s",
+                command,
+                base_command,
+                timestamp,
+                sorted(self._command_allowlist),
+            )
+            return json.dumps({
+                "error": (
+                    f"Command '{base_command}' is not in the allowed "
+                    f"commands list. Allowed commands: "
+                    f"{sorted(self._command_allowlist)}"
+                ),
+            })
+
+        logger.info(
+            "Shell command ALLOWED: command=%r base_command=%r timestamp=%s",
+            command,
+            base_command,
+            timestamp,
+        )
+
         if self._executor_callback:
             result = await self._executor_callback(command)
             return json.dumps(result)
@@ -119,6 +189,41 @@ class ShellHandler(BuiltinToolHandler):
             },
         }
         return call_item
+
+    def _is_command_allowed(self, command: str) -> tuple[bool, str]:
+        """Check whether *command* starts with an allowed base command.
+
+        Extracts the first token (the executable name) from the command
+        string using ``shlex.split`` and checks it against the allowlist.
+        Pipe chains and logical operators (``|``, ``&&``, ``||``, ``;``)
+        cause each segment to be validated — ALL segments must be allowed.
+
+        Returns:
+            A tuple of (is_allowed, base_command_that_failed_or_first).
+        """
+        # Split on shell operators to catch chained commands
+        # e.g. "ls -la && rm -rf /" -> ["ls -la", "rm -rf /"]
+        segments = re.split(r"\s*(?:\|\||&&|[;|])\s*", command)
+
+        first_base = ""
+        for segment in segments:
+            segment = segment.strip()
+            if not segment:
+                continue
+            try:
+                tokens = shlex.split(segment)
+            except ValueError:
+                # Malformed shell quoting — reject with the raw segment
+                return False, segment.split()[0] if segment.split() else segment
+            if not tokens:
+                continue
+            base = tokens[0]
+            if not first_base:
+                first_base = base
+            if base not in self._command_allowlist:
+                return False, base
+
+        return True, first_base
 
     async def _run_subprocess(self, command: str) -> str:
         """Execute a shell command in a subprocess."""

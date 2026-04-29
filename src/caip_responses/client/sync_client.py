@@ -151,6 +151,7 @@ class Client:
         shell_timeout: int = 30,
         shell_working_dir: str | None = None,
         shell_callback: ShellExecutorCallback | None = None,
+        shell_command_allowlist: set[str] | frozenset[str] | None = None,
         builtin_registry: BuiltinToolRegistry | None = None,
         # Redis (for persistent conversation store + cache)
         redis_url: str | None = None,
@@ -181,6 +182,7 @@ class Client:
             shell_timeout=shell_timeout,
             shell_working_dir=shell_working_dir,
             shell_callback=shell_callback,
+            shell_command_allowlist=shell_command_allowlist,
             builtin_registry=builtin_registry,
             redis_url=redis_url,
             conversation_ttl=conversation_ttl,

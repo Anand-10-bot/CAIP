@@ -46,11 +46,11 @@ all = [
     "caip-responses-lib[mcp]",
 ]
 dev = [
-    "pytest>=8",
-    "pytest-asyncio>=0.24",
-    "pytest-mock>=3",
-    "ruff>=0.8",
-    "bandit>=1.8",
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<1",
+    "pytest-mock>=3,<4",
+    "ruff>=0.8,<1",
+    "bandit>=1.8,<2",
 ]
 
 [tool.hatch.build.targets.wheel]

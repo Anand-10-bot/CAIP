@@ -429,6 +429,7 @@ class AsyncClient:
         shell_timeout: int = 30,
         shell_working_dir: str | None = None,
         shell_callback: ShellExecutorCallback | None = None,
+        shell_command_allowlist: set[str] | frozenset[str] | None = None,
         builtin_registry: BuiltinToolRegistry | None = None,
         # Redis (for persistent conversation store + cache)
         redis_url: str | None = None,
@@ -503,6 +504,7 @@ class AsyncClient:
             shell_timeout=shell_timeout,
             shell_working_dir=shell_working_dir,
             shell_callback=shell_callback,
+            shell_command_allowlist=shell_command_allowlist,
         )
 
         # Discover entry-point plugins
@@ -655,6 +657,7 @@ class AsyncClient:
         shell_timeout: int,
         shell_working_dir: str | None,
         shell_callback: ShellExecutorCallback | None,
+        shell_command_allowlist: set[str] | frozenset[str] | None,
     ) -> BuiltinToolRegistry:
         """Build the default builtin tool registry from config."""
         registry = BuiltinToolRegistry()
@@ -684,6 +687,7 @@ class AsyncClient:
             timeout=shell_timeout,
             working_dir=shell_working_dir,
             executor_callback=shell_callback,
+            command_allowlist=shell_command_allowlist,
         ))
 
         # MCP — delegates to Azure OpenAI for MCP server connections
