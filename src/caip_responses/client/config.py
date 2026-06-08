@@ -18,6 +18,10 @@ class CaipResponsesConfig(BaseSettings):
     gemini_api_key: str = ""
     sarvam_api_key: str = ""
     sarvam_base_url: str = "https://api.sarvam.ai/v1"
+    # Open-source models via an OpenAI-compatible server (Ollama, vLLM, LM Studio).
+    # Set ollama_base_url to enable; api key is optional (most local servers ignore it).
+    ollama_api_key: str = ""
+    ollama_base_url: str = ""
 
     # Redis (for persistent conversation store + cache)
     redis_url: str = ""

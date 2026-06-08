@@ -21,6 +21,17 @@ class ProviderRegistry:
         "claude-": "anthropic",
         "gemini-": "gemini",
         "sarvam-": "sarvam",
+        # Open-source models served via an OpenAI-compatible endpoint
+        # (Ollama, vLLM, LM Studio). Use "ollama/<model>" for anything else.
+        "llama": "ollama",
+        "mistral": "ollama",
+        "mixtral": "ollama",
+        "qwen": "ollama",
+        "qwq": "ollama",
+        "gemma": "ollama",
+        "phi": "ollama",
+        "deepseek": "ollama",
+        "ollama/": "ollama",
     }
 
     def __init__(self, default_provider: str | None = None) -> None:

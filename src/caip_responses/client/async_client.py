@@ -411,6 +411,8 @@ class AsyncClient:
         gemini_api_key: str | None = None,
         sarvam_api_key: str | None = None,
         sarvam_base_url: str | None = None,
+        ollama_api_key: str | None = None,
+        ollama_base_url: str | None = None,
         default_provider: str | None = None,
         providers: dict[str, BaseProvider] | None = None,
         max_conversation_history: int = 1000,
@@ -531,6 +533,10 @@ class AsyncClient:
         self._init_sarvam(
             api_key=sarvam_api_key or config.sarvam_api_key or None,
             base_url=sarvam_base_url or config.sarvam_base_url or None,
+        )
+        self._init_ollama(
+            api_key=ollama_api_key or config.ollama_api_key or None,
+            base_url=ollama_base_url or config.ollama_base_url or None,
         )
 
         self._responses = _ResponsesNamespace(
@@ -760,5 +766,17 @@ class AsyncClient:
                 base_url=base_url or "https://api.sarvam.ai/v1",
             )
             self._registry.register("sarvam", provider)
+        except ImportError:
+            pass
+
+    def _init_ollama(self, api_key: str | None, base_url: str | None) -> None:
+        # Ollama/vLLM/LM Studio rarely need an API key, so registration is
+        # gated on base_url (the one setting that's always required).
+        if not base_url:
+            return
+        try:
+            from caip_responses.providers.ollama_provider import OllamaProvider
+            provider = OllamaProvider(api_key=api_key, base_url=base_url)
+            self._registry.register("ollama", provider)
         except ImportError:
             pass
