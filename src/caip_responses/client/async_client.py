@@ -409,6 +409,10 @@ class AsyncClient:
         anthropic_api_key: str | None = None,
         anthropic_base_url: str | None = None,
         gemini_api_key: str | None = None,
+        gemini_vertexai: bool | None = None,
+        gemini_project: str | None = None,
+        gemini_location: str | None = None,
+        gemini_service_account_path: str | None = None,
         sarvam_api_key: str | None = None,
         sarvam_base_url: str | None = None,
         ollama_api_key: str | None = None,
@@ -529,6 +533,14 @@ class AsyncClient:
         )
         self._init_gemini(
             api_key=gemini_api_key or config.gemini_api_key or None,
+            vertexai=gemini_vertexai if gemini_vertexai is not None else config.gemini_vertexai,
+            project=gemini_project or config.gemini_project or None,
+            location=gemini_location or config.gemini_location or "us-central1",
+            service_account_path=(
+                gemini_service_account_path
+                or config.gemini_service_account_path
+                or None
+            ),
         )
         self._init_sarvam(
             api_key=sarvam_api_key or config.sarvam_api_key or None,
@@ -746,12 +758,28 @@ class AsyncClient:
         except ImportError:
             pass
 
-    def _init_gemini(self, api_key: str | None) -> None:
-        if not api_key:
+    def _init_gemini(
+        self,
+        api_key: str | None,
+        *,
+        vertexai: bool = False,
+        project: str | None = None,
+        location: str = "us-central1",
+        service_account_path: str | None = None,
+    ) -> None:
+        # Register if we have either a Developer API key or Vertex AI auth
+        # (a service account path, or vertexai=True for default credentials).
+        if not (api_key or service_account_path or vertexai):
             return
         try:
             from caip_responses.providers.gemini_provider import GeminiProvider
-            provider = GeminiProvider(api_key=api_key)
+            provider = GeminiProvider(
+                api_key=api_key,
+                vertexai=vertexai,
+                project=project,
+                location=location,
+                service_account_path=service_account_path,
+            )
             self._registry.register("gemini", provider)
         except ImportError:
             pass

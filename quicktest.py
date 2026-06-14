@@ -18,6 +18,12 @@ sys.stdout.reconfigure(encoding="utf-8")
 # ─────────────────────────────────────────────
 GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY",  "")   # ← paste gemini key here
 SARVAM_API_KEY  = os.getenv("SARVAM_API_KEY",  "")   # ← paste sarvam key here
+
+# Gemini via Vertex AI (service account JSON instead of an API key).
+# Set the path to your service-account .json file and a region. Requires a
+# GCP project with the Vertex AI API enabled and billing active.
+GEMINI_SERVICE_ACCOUNT = os.getenv("GEMINI_SERVICE_ACCOUNT", "")  # ← path to .json
+GEMINI_LOCATION         = os.getenv("GEMINI_LOCATION", "us-central1")
 # ─────────────────────────────────────────────
 
 from caip_responses import AsyncClient
@@ -191,7 +197,19 @@ async def main():
     any_test_ran = False
 
     # ── Gemini ──────────────────────────────────────────────
-    if GEMINI_API_KEY:
+    if GEMINI_SERVICE_ACCOUNT:
+        any_test_ran = True
+        print("\n🟢  Running GEMINI tests (Vertex AI / service account)...")
+        await run_all_tests(
+            api_key="",
+            model="gemini-2.5-flash",
+            provider_label="Gemini (Vertex)",
+            extra_kwargs={
+                "gemini_service_account_path": GEMINI_SERVICE_ACCOUNT,
+                "gemini_location": GEMINI_LOCATION,
+            },
+        )
+    elif GEMINI_API_KEY:
         any_test_ran = True
         print("\n🟢  Running GEMINI tests...")
         await run_all_tests(
@@ -201,7 +219,7 @@ async def main():
             extra_kwargs={"gemini_api_key": GEMINI_API_KEY},
         )
     else:
-        print("⏭️  Gemini skipped (no GEMINI_API_KEY set)")
+        print("⏭️  Gemini skipped (no GEMINI_API_KEY or GEMINI_SERVICE_ACCOUNT set)")
 
     # ── Sarvam ──────────────────────────────────────────────
     if SARVAM_API_KEY:

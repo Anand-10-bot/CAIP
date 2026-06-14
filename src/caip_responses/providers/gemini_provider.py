@@ -40,13 +40,63 @@ class GeminiProvider(BaseProvider):
     to calling any other provider; all translation happens internally.
     """
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        vertexai: bool = False,
+        project: str | None = None,
+        location: str = "us-central1",
+        service_account_path: str | None = None,
+        service_account_info: dict[str, Any] | None = None,
+    ) -> None:
+        """Create a Gemini provider.
+
+        Two auth modes, selected automatically:
+
+        - **Developer API (AI Studio)** — pass ``api_key``. Simplest; uses
+          ``generativelanguage.googleapis.com``.
+        - **Vertex AI (Google Cloud)** — pass a service account via
+          ``service_account_path`` (path to the JSON) or
+          ``service_account_info`` (the parsed dict), or set ``vertexai=True``
+          to use Application Default Credentials. Requires a GCP project with
+          the Vertex AI API enabled and billing active. ``project`` is read
+          from the service account JSON if not given; ``location`` defaults to
+          ``us-central1``.
+        """
         if genai is None:
             raise ImportError(
                 "google-genai package is required for GeminiProvider. "
                 "Install it with: pip install caip-responses-lib[gemini]"
             )
-        self._client = genai.Client(api_key=api_key)
+
+        use_vertex = vertexai or bool(service_account_path or service_account_info)
+        if use_vertex:
+            credentials = None
+            if service_account_path or service_account_info:
+                from google.oauth2 import service_account as _sa
+
+                scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+                if service_account_info is not None:
+                    credentials = _sa.Credentials.from_service_account_info(
+                        service_account_info, scopes=scopes
+                    )
+                    project = project or service_account_info.get("project_id")
+                else:
+                    credentials = _sa.Credentials.from_service_account_file(
+                        service_account_path, scopes=scopes
+                    )
+                    if project is None:
+                        with open(service_account_path) as f:
+                            project = json.load(f).get("project_id")
+            self._client = genai.Client(
+                vertexai=True,
+                project=project,
+                location=location,
+                credentials=credentials,
+            )
+        else:
+            self._client = genai.Client(api_key=api_key)
 
     @property
     def provider_name(self) -> str:
