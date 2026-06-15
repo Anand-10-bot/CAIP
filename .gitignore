@@ -16,3 +16,8 @@ env/
 htmlcov/
 .coverage
 *.log
+
+# Service-account / credential files — never commit
+gemini-sa.json
+*-sa.json
+*service-account*.json

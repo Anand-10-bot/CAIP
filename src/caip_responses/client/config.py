@@ -16,8 +16,18 @@ class CaipResponsesConfig(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
     gemini_api_key: str = ""
+    # Vertex AI mode (service account auth instead of a Developer API key).
+    # Set gemini_service_account_path to the JSON key file to enable.
+    gemini_vertexai: bool = False
+    gemini_project: str = ""
+    gemini_location: str = "us-central1"
+    gemini_service_account_path: str = ""
     sarvam_api_key: str = ""
     sarvam_base_url: str = "https://api.sarvam.ai/v1"
+    # Open-source models via an OpenAI-compatible server (Ollama, vLLM, LM Studio).
+    # Set ollama_base_url to enable; api key is optional (most local servers ignore it).
+    ollama_api_key: str = ""
+    ollama_base_url: str = ""
 
     # Redis (for persistent conversation store + cache)
     redis_url: str = ""

@@ -409,8 +409,14 @@ class AsyncClient:
         anthropic_api_key: str | None = None,
         anthropic_base_url: str | None = None,
         gemini_api_key: str | None = None,
+        gemini_vertexai: bool | None = None,
+        gemini_project: str | None = None,
+        gemini_location: str | None = None,
+        gemini_service_account_path: str | None = None,
         sarvam_api_key: str | None = None,
         sarvam_base_url: str | None = None,
+        ollama_api_key: str | None = None,
+        ollama_base_url: str | None = None,
         default_provider: str | None = None,
         providers: dict[str, BaseProvider] | None = None,
         max_conversation_history: int = 1000,
@@ -527,10 +533,22 @@ class AsyncClient:
         )
         self._init_gemini(
             api_key=gemini_api_key or config.gemini_api_key or None,
+            vertexai=gemini_vertexai if gemini_vertexai is not None else config.gemini_vertexai,
+            project=gemini_project or config.gemini_project or None,
+            location=gemini_location or config.gemini_location or "us-central1",
+            service_account_path=(
+                gemini_service_account_path
+                or config.gemini_service_account_path
+                or None
+            ),
         )
         self._init_sarvam(
             api_key=sarvam_api_key or config.sarvam_api_key or None,
             base_url=sarvam_base_url or config.sarvam_base_url or None,
+        )
+        self._init_ollama(
+            api_key=ollama_api_key or config.ollama_api_key or None,
+            base_url=ollama_base_url or config.ollama_base_url or None,
         )
 
         self._responses = _ResponsesNamespace(
@@ -740,12 +758,28 @@ class AsyncClient:
         except ImportError:
             pass
 
-    def _init_gemini(self, api_key: str | None) -> None:
-        if not api_key:
+    def _init_gemini(
+        self,
+        api_key: str | None,
+        *,
+        vertexai: bool = False,
+        project: str | None = None,
+        location: str = "us-central1",
+        service_account_path: str | None = None,
+    ) -> None:
+        # Register if we have either a Developer API key or Vertex AI auth
+        # (a service account path, or vertexai=True for default credentials).
+        if not (api_key or service_account_path or vertexai):
             return
         try:
             from caip_responses.providers.gemini_provider import GeminiProvider
-            provider = GeminiProvider(api_key=api_key)
+            provider = GeminiProvider(
+                api_key=api_key,
+                vertexai=vertexai,
+                project=project,
+                location=location,
+                service_account_path=service_account_path,
+            )
             self._registry.register("gemini", provider)
         except ImportError:
             pass
@@ -760,5 +794,17 @@ class AsyncClient:
                 base_url=base_url or "https://api.sarvam.ai/v1",
             )
             self._registry.register("sarvam", provider)
+        except ImportError:
+            pass
+
+    def _init_ollama(self, api_key: str | None, base_url: str | None) -> None:
+        # Ollama/vLLM/LM Studio rarely need an API key, so registration is
+        # gated on base_url (the one setting that's always required).
+        if not base_url:
+            return
+        try:
+            from caip_responses.providers.ollama_provider import OllamaProvider
+            provider = OllamaProvider(api_key=api_key, base_url=base_url)
+            self._registry.register("ollama", provider)
         except ImportError:
             pass
