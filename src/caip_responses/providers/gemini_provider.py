@@ -484,8 +484,12 @@ class GeminiProvider(BaseProvider):
                 call_id = item.get("call_id", "")
                 fn_name = call_id_to_name.get(call_id, call_id or "function")
                 output = item.get("output", "")
+                # Gemini requires function_response.response to be a JSON
+                # object. Parse the output, but wrap any non-dict result
+                # (number, string, bool, list) so it stays a valid object.
                 try:
-                    response_data = json.loads(output)
+                    parsed = json.loads(output)
+                    response_data = parsed if isinstance(parsed, dict) else {"result": parsed}
                 except (json.JSONDecodeError, TypeError):
                     response_data = {"result": output}
                 contents.append({

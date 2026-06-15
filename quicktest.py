@@ -132,6 +132,50 @@ async def test_function_calling(client: AsyncClient, model: str, provider_label:
         print("  ⚠️  Model skipped tool call (answered directly) — still OK")
 
 
+async def _add_handler(name: str, arguments: dict) -> str:
+    """User-registered callback for the `add` tool. Returns the sum as a string."""
+    a = arguments.get("a", 0)
+    b = arguments.get("b", 0)
+    print(f"  [tool executed] add(a={a}, b={b}) = {a + b}")
+    return str(a + b)
+
+
+async def test_tool_execution(client: AsyncClient, model: str, provider_label: str):
+    """Test 6: end-to-end tool calling — the agent loop executes `add` and
+    feeds the result back, so the final answer must contain the real sum."""
+    print(f"\n{'='*55}")
+    print(f"  TEST 6 — Tool execution (add)  [{provider_label} / {model}]")
+    print(f"{'='*55}")
+
+    # Register the function so the agent loop can actually run it
+    client.tools.register("add", _add_handler)
+
+    response = await client.responses.create(
+        model=model,
+        input="What is 27 + 17? Use the add tool to compute it.",
+        tools=[{
+            "type": "function",
+            "name": "add",
+            "description": "Add two numbers and return their sum",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number", "description": "First number"},
+                    "b": {"type": "number", "description": "Second number"},
+                },
+                "required": ["a", "b"],
+            },
+        }],
+        tool_choice="auto",
+    )
+
+    print(f"  Final answer    : {response.output_text}")
+    assert "44" in response.output_text, (
+        f"Expected the executed sum '44' in the final answer, got: {response.output_text!r}"
+    )
+    print("  ✅ PASSED — model called add, loop executed it, answer used the result")
+
+
 async def test_multi_turn(client: AsyncClient, model: str, provider_label: str):
     """Test 5: multi-turn conversation using previous_response_id."""
     print(f"\n{'='*55}")
@@ -176,6 +220,7 @@ async def run_all_tests(api_key: str, model: str, provider_label: str, extra_kwa
         test_streaming,
         test_function_calling,
         test_multi_turn,
+        test_tool_execution,
     ]
 
     for test_fn in tests:

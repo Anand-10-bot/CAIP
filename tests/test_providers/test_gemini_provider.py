@@ -87,6 +87,66 @@ class TestGeminiTranslation:
         assert fr["name"] == "search_db"  # must be function name
         assert fr["name"] != "call_abc123"  # must NOT be call_id
 
+    def test_function_response_wraps_scalar_output(self):
+        """Gemini requires function_response.response to be an object. A
+        non-dict tool output (e.g. a bare number) must be wrapped, not
+        passed through raw — otherwise the google-genai SDK rejects it."""
+        provider = self._make_provider()
+        contents = provider._translate_input([
+            {
+                "type": "function_call",
+                "call_id": "fc_1",
+                "name": "add",
+                "arguments": '{"a": 25, "b": 17}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "fc_1",
+                "output": "42",  # bare JSON number — parses to int, not dict
+            },
+        ])
+        fr = contents[1]["parts"][0]["function_response"]
+        assert fr["response"] == {"result": 42}
+        assert isinstance(fr["response"], dict)
+
+    def test_function_response_preserves_object_output(self):
+        """A dict output is passed through unchanged (not double-wrapped)."""
+        provider = self._make_provider()
+        contents = provider._translate_input([
+            {
+                "type": "function_call",
+                "call_id": "fc_1",
+                "name": "get_weather",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "fc_1",
+                "output": '{"temp": 72}',
+            },
+        ])
+        fr = contents[1]["parts"][0]["function_response"]
+        assert fr["response"] == {"temp": 72}
+
+    def test_function_response_wraps_plain_string_output(self):
+        """A non-JSON plain string output is wrapped as {"result": ...}."""
+        provider = self._make_provider()
+        contents = provider._translate_input([
+            {
+                "type": "function_call",
+                "call_id": "fc_1",
+                "name": "echo",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "fc_1",
+                "output": "done",  # not valid JSON
+            },
+        ])
+        fr = contents[1]["parts"][0]["function_response"]
+        assert fr["response"] == {"result": "done"}
+
     def test_translate_input_skips_system(self):
         provider = self._make_provider()
         contents = provider._translate_input([
