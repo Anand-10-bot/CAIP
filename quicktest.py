@@ -1,29 +1,19 @@
-"""
-Quick live test — paste your API key below and run:
-    python quicktest.py
-
-Tests supported:
-  1. Gemini  (gemini-2.0-flash)   — free key at https://aistudio.google.com/app/apikey
-  2. Sarvam  (sarvam-m)           — free key at https://dashboard.sarvam.ai
-"""
-
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-# ─────────────────────────────────────────────
-# PASTE YOUR KEY(S) HERE  (or set as env vars)
-# ─────────────────────────────────────────────
-GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY",  "")   # ← paste gemini key here
-SARVAM_API_KEY  = os.getenv("SARVAM_API_KEY",  "")   # ← paste sarvam key here
 
-# Gemini via Vertex AI (service account JSON instead of an API key).
-# Set the path to your service-account .json file and a region. Requires a
-# GCP project with the Vertex AI API enabled and billing active.
 GEMINI_SERVICE_ACCOUNT = os.getenv("GEMINI_SERVICE_ACCOUNT", "")  # ← path to .json
-GEMINI_LOCATION         = os.getenv("GEMINI_LOCATION", "us-central1")
+# If no env var, prefer a local file named `gemini-sa.json` next to this script
+if not GEMINI_SERVICE_ACCOUNT:
+    default_sa = str(Path(__file__).resolve().parent / "gemini-sa.json")
+    if Path(default_sa).exists():
+        GEMINI_SERVICE_ACCOUNT = default_sa
+
+GEMINI_LOCATION = os.getenv("GEMINI_LOCATION", "us-central1")
 # ─────────────────────────────────────────────
 
 from caip_responses import AsyncClient
@@ -78,7 +68,7 @@ async def test_streaming(client: AsyncClient, model: str, provider_label: str):
 
     async for event in await client.responses.create(
         model=model,
-        input="Name three countries in Europe. Be brief.",
+        input="Greet yourself in one sentence, then say 'Goodbye!' in the next sentence.",
         stream=True,
     ):
         event_types.append(event.type)
@@ -176,6 +166,67 @@ async def test_tool_execution(client: AsyncClient, model: str, provider_label: s
     print("  ✅ PASSED — model called add, loop executed it, answer used the result")
 
 
+def _item_attr(item, key, default=None):
+    """Read a field from an output item whether it's a dict or a model."""
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+async def test_web_search(client: AsyncClient, model: str, provider_label: str):
+    """Test 7: web search — Gemini handles {"type": "web_search"} natively via
+    Google Search grounding. The response should contain a web_search_call item
+    and the answer text should carry url_citation annotations."""
+    print(f"\n{'='*55}")
+    print(f"  TEST 7 — Web search (grounding)  [{provider_label} / {model}]")
+    print(f"{'='*55}")
+
+    response = await client.responses.create(
+        model=model,
+        input=(
+            "Use web search to find out: who won the most recent Formula 1 "
+            "race, and on what date? Answer in one sentence."
+        ),
+        tools=[{"type": "web_search"}],
+        max_output_tokens=2000,
+    )
+
+    print(f"  Status          : {response.status}")
+    print(f"  Answer          : {response.output_text}")
+
+    # Count native web_search_call items surfaced from grounding metadata
+    search_calls = [
+        item for item in response.output
+        if _item_attr(item, "type") == "web_search_call"
+    ]
+    print(f"  web_search_call items : {len(search_calls)}")
+    for sc in search_calls:
+        action = _item_attr(sc, "action", {}) or {}
+        query = action.get("query") if isinstance(action, dict) else _item_attr(action, "query")
+        print(f"    • searched: {query}")
+
+    # Collect url_citation annotations from the message text
+    citations = []
+    for item in response.output:
+        if _item_attr(item, "type") != "message":
+            continue
+        for block in (_item_attr(item, "content", []) or []):
+            for ann in (_item_attr(block, "annotations", []) or []):
+                if _item_attr(ann, "type") == "url_citation":
+                    citations.append(_item_attr(ann, "url", ""))
+    if citations:
+        print(f"  Citations       : {len(citations)} source(s)")
+        for url in citations[:5]:
+            print(f"    • {url}")
+
+    assert response.output_text, "Expected a non-empty grounded answer"
+    if search_calls or citations:
+        print("  ✅ PASSED — Gemini grounded the answer with Google Search")
+    else:
+        # Model may answer from parametric knowledge without grounding
+        print("  ⚠️  No grounding metadata returned (model answered directly) — still OK")
+
+
 async def test_multi_turn(client: AsyncClient, model: str, provider_label: str):
     """Test 5: multi-turn conversation using previous_response_id."""
     print(f"\n{'='*55}")
@@ -185,7 +236,7 @@ async def test_multi_turn(client: AsyncClient, model: str, provider_label: str):
     # Turn 1
     r1 = await client.responses.create(
         model=model,
-        input="My name is Alex. Remember that.",
+        input="My name is Anand.",
     )
     print(f"  Turn 1: {r1.output_text[:80]}")
 
@@ -197,7 +248,7 @@ async def test_multi_turn(client: AsyncClient, model: str, provider_label: str):
     )
     print(f"  Turn 2: {r2.output_text[:80]}")
 
-    if "alex" in r2.output_text.lower():
+    if "anand" in r2.output_text.lower():
         print("  ✅ PASSED — model remembered the name from turn 1")
     else:
         print("  ⚠️  Model may not have retained context (check output above)")
@@ -221,6 +272,7 @@ async def run_all_tests(api_key: str, model: str, provider_label: str, extra_kwa
         test_function_calling,
         test_multi_turn,
         test_tool_execution,
+        test_web_search,
     ]
 
     for test_fn in tests:
@@ -254,36 +306,15 @@ async def main():
                 "gemini_location": GEMINI_LOCATION,
             },
         )
-    elif GEMINI_API_KEY:
-        any_test_ran = True
-        print("\n🟢  Running GEMINI tests...")
-        await run_all_tests(
-            api_key=GEMINI_API_KEY,
-            model="gemini-2.0-flash-lite",
-            provider_label="Gemini",
-            extra_kwargs={"gemini_api_key": GEMINI_API_KEY},
-        )
     else:
-        print("⏭️  Gemini skipped (no GEMINI_API_KEY or GEMINI_SERVICE_ACCOUNT set)")
+        print("⏭️  Gemini skipped (no GEMINI_SERVICE_ACCOUNT set and gemini-sa.json not found)")
 
-    # ── Sarvam ──────────────────────────────────────────────
-    if SARVAM_API_KEY:
-        any_test_ran = True
-        print("\n🟣  Running SARVAM tests...")
-        await run_all_tests(
-            api_key=SARVAM_API_KEY,
-            model="sarvam-30b",
-            provider_label="Sarvam",
-            extra_kwargs={"sarvam_api_key": SARVAM_API_KEY},
-        )
-    else:
-        print("⏭️  Sarvam skipped (no SARVAM_API_KEY set)")
+    # Sarvam tests removed — quicktest now targets Gemini only
 
     if not any_test_ran:
-        print("\n❗ No API keys configured.")
-        print("   Edit quicktest.py and paste your key into GEMINI_API_KEY or SARVAM_API_KEY.")
-        print("   Free Gemini key: https://aistudio.google.com/app/apikey")
-        print("   Free Sarvam key: https://dashboard.sarvam.ai\n")
+        print("\n❗ No Gemini service account configured.")
+        print("   Place gemini-sa.json in this folder or set GEMINI_SERVICE_ACCOUNT env var.")
+        print("   See https://aistudio.google.com/app/apikey for details on obtaining credentials.\n")
 
 
 if __name__ == "__main__":

@@ -413,7 +413,106 @@ class TestGeminiTranslation:
     def test_supports_tool(self):
         provider = self._make_provider()
         assert provider.supports_tool("function") is True
-        assert provider.supports_tool("web_search") is False
+        # web_search is supported natively via Google Search grounding
+        assert provider.supports_tool("web_search") is True
+        assert provider.supports_tool("mcp") is False
+
+    def test_build_kwargs_with_web_search(self):
+        """A web_search tool maps to Gemini's native google_search tool."""
+        provider = self._make_provider()
+        request = CreateResponseRequest(
+            model="gemini-2.0-flash",
+            input="What's the latest news?",
+            tools=[{"type": "web_search"}],
+        )
+        kwargs = provider._build_kwargs(request)
+
+        tools = kwargs["config"]["tools"]
+        assert {"google_search": {}} in tools
+        # No tool_config (tool_choice) since there are no function declarations
+        assert "tool_config" not in kwargs["config"]
+
+    def test_build_kwargs_function_and_web_search(self):
+        """Function tools and web_search coexist in the Gemini tools list."""
+        provider = self._make_provider()
+        request = CreateResponseRequest(
+            model="gemini-2.0-flash",
+            input="Look it up then call the tool",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "save",
+                    "description": "Save",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                {"type": "web_search"},
+            ],
+        )
+        kwargs = provider._build_kwargs(request)
+
+        tools = kwargs["config"]["tools"]
+        # One entry with function_declarations, one with google_search
+        fn_entries = [t for t in tools if "function_declarations" in t]
+        gs_entries = [t for t in tools if "google_search" in t]
+        assert len(fn_entries) == 1
+        assert fn_entries[0]["function_declarations"][0]["name"] == "save"
+        assert len(gs_entries) == 1
+
+    def test_convert_response_with_grounding(self):
+        """Grounding metadata becomes web_search_call items + url citations."""
+        provider = self._make_provider()
+
+        mock_text_part = MagicMock()
+        mock_text_part.text = "Python 3.13 was released."
+        mock_text_part.function_call = None
+        mock_text_part.thought = None
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_text_part]
+
+        mock_web = MagicMock()
+        mock_web.uri = "https://python.org/news"
+        mock_web.title = "Python.org"
+        mock_chunk = MagicMock()
+        mock_chunk.web = mock_web
+
+        mock_meta = MagicMock()
+        mock_meta.web_search_queries = ["latest python release"]
+        mock_meta.grounding_chunks = [mock_chunk]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+        mock_candidate.grounding_metadata = mock_meta
+
+        mock_result = MagicMock()
+        mock_result.candidates = [mock_candidate]
+        mock_result.usage_metadata = MagicMock()
+        mock_result.usage_metadata.prompt_token_count = 12
+        mock_result.usage_metadata.candidates_token_count = 9
+
+        response = provider._convert_response(mock_result, "gemini-2.0-flash")
+
+        # web_search_call item present and ahead of the message
+        search_items = [
+            i for i in response.output
+            if isinstance(i, dict) and i.get("type") == "web_search_call"
+        ]
+        assert len(search_items) == 1
+        assert search_items[0]["action"]["query"] == "latest python release"
+        assert response.output[0]["type"] == "web_search_call"
+
+        # Answer text carries url_citation annotations
+        assert response.output_text == "Python 3.13 was released."
+        message = [
+            i for i in response.output
+            if isinstance(i, dict) and i.get("type") == "message"
+        ][0]
+        annotations = message["content"][0]["annotations"]
+        assert annotations == [{
+            "type": "url_citation",
+            "url": "https://python.org/news",
+            "title": "Python.org",
+        }]
 
     def test_supports_reasoning(self):
         provider = self._make_provider()
@@ -641,6 +740,62 @@ class TestGeminiStreaming:
 
         args_done = [e for e in events if e.type == "response.function_call_arguments.done"][0]
         assert json.loads(args_done.delta) == {"q": "test"}
+
+    @pytest.mark.asyncio
+    async def test_stream_with_grounding(self):
+        """A final chunk carrying grounding metadata emits a web_search_call."""
+        provider = self._make_provider()
+
+        async def mock_stream():
+            # Text chunk
+            chunk1 = MagicMock()
+            part = MagicMock()
+            part.text = "Here is the answer."
+            part.function_call = None
+            part.thought = None
+            cand1 = MagicMock()
+            cand1.content = MagicMock()
+            cand1.content.parts = [part]
+            cand1.grounding_metadata = None
+            chunk1.candidates = [cand1]
+            chunk1.usage_metadata = None
+            yield chunk1
+
+            # Final chunk: grounding metadata, no content parts
+            chunk2 = MagicMock()
+            meta = MagicMock()
+            meta.web_search_queries = ["today's news"]
+            meta.grounding_chunks = []
+            cand2 = MagicMock()
+            cand2.content = None
+            cand2.grounding_metadata = meta
+            chunk2.candidates = [cand2]
+            chunk2.usage_metadata = MagicMock()
+            chunk2.usage_metadata.prompt_token_count = 8
+            chunk2.usage_metadata.candidates_token_count = 6
+            yield chunk2
+
+        provider._client.aio.models.generate_content_stream = AsyncMock(return_value=mock_stream())
+
+        request = CreateResponseRequest(
+            model="gemini-2.0-flash",
+            input="What's the news?",
+            tools=[{"type": "web_search"}],
+        )
+        events = []
+        async for event in provider.create_response_stream(request):
+            events.append(event)
+
+        # A web_search_call item was emitted
+        search_added = [
+            e for e in events
+            if e.type == "response.output_item.added"
+            and isinstance(e.item, dict)
+            and e.item.get("type") == "web_search_call"
+        ]
+        assert len(search_added) == 1
+        assert search_added[0].item["action"]["query"] == "today's news"
+        assert events[-1].type == "response.completed"
 
     @pytest.mark.asyncio
     async def test_stream_empty_candidates(self):

@@ -103,7 +103,9 @@ class GeminiProvider(BaseProvider):
         return "gemini"
 
     def supports_tool(self, tool_type: str) -> bool:
-        return tool_type in {"function"}
+        # web_search maps natively to Gemini's Google Search grounding tool,
+        # so it does NOT need the client-side WebSearchHandler fallback.
+        return tool_type in {"function", "web_search"}
 
     def supports_reasoning(self) -> bool:
         return True
@@ -156,6 +158,7 @@ class GeminiProvider(BaseProvider):
             message_item_emitted = False
             input_tokens = 0
             output_tokens = 0
+            grounding_search_items: list[dict[str, Any]] = []
 
             async for chunk in await self._client.aio.models.generate_content_stream(**kwargs):
                 # Extract usage from metadata
@@ -168,6 +171,12 @@ class GeminiProvider(BaseProvider):
                     continue
 
                 for candidate in chunk.candidates:
+                    # Capture Google Search grounding (usually on the final
+                    # chunk, which may carry no content parts of its own).
+                    search_items, _ = _extract_grounding(candidate)
+                    if search_items:
+                        grounding_search_items = search_items
+
                     if not candidate.content or not candidate.content.parts:
                         continue
 
@@ -303,6 +312,24 @@ class GeminiProvider(BaseProvider):
                     output_index=current_item_index,
                 )
                 seq += 1
+                current_item_index += 1
+
+            # Surface Google Search grounding as web_search_call items
+            for search_item in grounding_search_items:
+                yield StreamEvent(
+                    type="response.output_item.added",
+                    sequence_number=seq,
+                    output_index=current_item_index,
+                    item=search_item,
+                )
+                seq += 1
+                yield StreamEvent(
+                    type="response.output_item.done",
+                    sequence_number=seq,
+                    output_index=current_item_index,
+                )
+                seq += 1
+                current_item_index += 1
 
             # Emit response.completed
             yield StreamEvent(
@@ -391,15 +418,28 @@ class GeminiProvider(BaseProvider):
             if effort:
                 config["thinking_config"] = {"thinking_budget": _effort_to_budget(effort)}
 
-        # Tools → Gemini function_declarations
+        # Tools → Gemini tools list. Function tools become
+        # function_declarations; a web_search tool maps to Gemini's native
+        # Google Search grounding tool ({"google_search": {}}).
         if request.tools:
-            gemini_tools = self._translate_tools(request.tools)
-            if gemini_tools:
-                kwargs["config"] = config
-                config["tools"] = [{"function_declarations": gemini_tools}]
+            gemini_tools: list[dict[str, Any]] = []
 
-                # Tool choice
-                if request.tool_choice is not None:
+            declarations = self._translate_tools(request.tools)
+            if declarations:
+                gemini_tools.append({"function_declarations": declarations})
+
+            if any(
+                isinstance(t, dict) and t.get("type") == "web_search"
+                for t in request.tools
+            ):
+                gemini_tools.append({"google_search": {}})
+
+            if gemini_tools:
+                config["tools"] = gemini_tools
+                kwargs["config"] = config
+
+                # Tool choice only applies to function calling, not grounding.
+                if declarations and request.tool_choice is not None:
                     tc_mode = self._translate_tool_choice(request.tool_choice)
                     if tc_mode:
                         config["tool_config"] = {
@@ -542,6 +582,8 @@ class GeminiProvider(BaseProvider):
         """Convert a Gemini GenerateContentResponse → unified Response."""
         output_items: list[dict[str, Any]] = []
         text_parts: list[dict[str, Any]] = []
+        search_items: list[dict[str, Any]] = []
+        annotations: list[dict[str, Any]] = []
 
         # Extract parts from first candidate
         candidates = getattr(result, "candidates", []) or []
@@ -549,6 +591,9 @@ class GeminiProvider(BaseProvider):
             candidate = candidates[0]
             content = getattr(candidate, "content", None)
             parts = getattr(content, "parts", []) if content else []
+
+            # Google Search grounding → web_search_call items + citations
+            search_items, annotations = _extract_grounding(candidate)
 
             for part in parts:
                 # Function call
@@ -601,6 +646,18 @@ class GeminiProvider(BaseProvider):
                 "status": "completed",
             })
 
+        # Attach grounding citations to the answer text, and surface the
+        # search itself as web_search_call item(s) ahead of the message —
+        # mirroring how OpenAI's native web_search appears in the output.
+        if annotations:
+            for item in output_items:
+                if item.get("type") == "message":
+                    for block in item.get("content", []):
+                        if isinstance(block, dict) and block.get("type") == "output_text":
+                            block["annotations"] = annotations
+        if search_items:
+            output_items = search_items + output_items
+
         # Build usage
         usage = None
         usage_meta = getattr(result, "usage_metadata", None)
@@ -626,6 +683,50 @@ class GeminiProvider(BaseProvider):
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+def _extract_grounding(
+    candidate: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Extract Google Search grounding from a Gemini candidate.
+
+    Returns a tuple of:
+    - ``web_search_call`` output items (one per search query) for API parity
+      with OpenAI's native web_search.
+    - ``url_citation`` annotations built from the grounding chunks.
+    """
+    meta = getattr(candidate, "grounding_metadata", None)
+    if not meta:
+        return [], []
+
+    search_items: list[dict[str, Any]] = []
+    queries = getattr(meta, "web_search_queries", None)
+    if isinstance(queries, (list, tuple)):
+        for query in queries:
+            search_items.append({
+                "type": "web_search_call",
+                "id": generate_item_id(),
+                "status": "completed",
+                "action": {"type": "search", "query": query},
+            })
+
+    annotations: list[dict[str, Any]] = []
+    chunks = getattr(meta, "grounding_chunks", None)
+    if isinstance(chunks, (list, tuple)):
+        for chunk in chunks:
+            web = getattr(chunk, "web", None)
+            if not web:
+                continue
+            url = getattr(web, "uri", "") or ""
+            if not url:
+                continue
+            annotations.append({
+                "type": "url_citation",
+                "url": url,
+                "title": getattr(web, "title", "") or "",
+            })
+
+    return search_items, annotations
+
 
 def _effort_to_budget(effort: str) -> int:
     """Map reasoning effort → Gemini thinking budget tokens."""
