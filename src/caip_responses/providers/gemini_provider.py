@@ -558,7 +558,7 @@ class GeminiProvider(BaseProvider):
                 }
                 params = tool.get("parameters", {})
                 if params:
-                    decl["parameters"] = params
+                    decl["parameters"] = _sanitize_schema(params)
                 declarations.append(decl)
             # Skip non-function tools (web_search, mcp, etc.)
         return declarations
@@ -731,6 +731,33 @@ def _extract_grounding(
 def _effort_to_budget(effort: str) -> int:
     """Map reasoning effort → Gemini thinking budget tokens."""
     return {"low": 1024, "medium": 4096, "high": 16384}.get(effort, 4096)
+
+
+# JSON Schema meta-keywords that Gemini's function_declarations parser
+# rejects. Tools sourced from MCP servers (or rich user schemas) often
+# include these, so they must be stripped before translation.
+_GEMINI_UNSUPPORTED_SCHEMA_KEYS = frozenset({
+    "$schema", "$id", "$ref", "$defs", "$comment",
+    "definitions", "additionalProperties",
+})
+
+
+def _sanitize_schema(schema: Any) -> Any:
+    """Recursively drop schema keywords Gemini doesn't accept.
+
+    Gemini's function parameter schema is a restricted OpenAPI subset; keys
+    like ``$schema`` and ``additionalProperties`` raise validation errors in
+    the google-genai SDK. This walks nested objects/arrays and removes them.
+    """
+    if isinstance(schema, dict):
+        return {
+            k: _sanitize_schema(v)
+            for k, v in schema.items()
+            if k not in _GEMINI_UNSUPPORTED_SCHEMA_KEYS
+        }
+    if isinstance(schema, list):
+        return [_sanitize_schema(v) for v in schema]
+    return schema
 
 
 def _extract_function_args(fc: Any) -> str:

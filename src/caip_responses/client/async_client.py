@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -34,6 +35,8 @@ from caip_responses.tool_handlers.web_search import (
     WebSearchMetrics,
 )
 from caip_responses.utils.json_schema import validate_json_against_schema
+
+logger = logging.getLogger(__name__)
 
 
 class _ResponsesNamespace:
@@ -128,6 +131,38 @@ class _ResponsesNamespace:
                 effective_input = prior_items + new_input
                 if effective_instructions is None and prior_instructions:
                     effective_instructions = prior_instructions
+
+        # MCP discovery pre-pass: for non-OpenAI providers that don't
+        # support MCP natively, connect to each MCP server and expose its
+        # tools as individual synthetic functions (with real schemas) so
+        # the agent loop can call them directly. Without this, the handler
+        # only produces a generic "request" function that can't invoke
+        # specific MCP tools. Discovery failures are non-fatal — the
+        # handler falls back to its generic function.
+        if (
+            tools
+            and resolved_provider.provider_name != "openai"
+            and self._builtin
+            and not resolved_provider.supports_tool("mcp")
+        ):
+            mcp_handler = self._builtin.get("mcp")
+            if mcp_handler is not None and hasattr(mcp_handler, "discover_tools"):
+                for tool in tools:
+                    if not isinstance(tool, dict) or tool.get("type") != "mcp":
+                        continue
+                    server_url = tool.get("server_url")
+                    if not server_url:
+                        continue
+                    server_label = tool.get("server_label", "mcp_server")
+                    try:
+                        await mcp_handler.discover_tools(server_label, server_url)
+                    except Exception as e:
+                        # Server unreachable / discovery failed — fall back
+                        # to the handler's generic request function.
+                        logger.warning(
+                            "MCP discovery failed for server %r (%s): %s",
+                            server_label, server_url, e,
+                        )
 
         # Preprocess tools for non-OpenAI providers: replace unsupported
         # built-in tools (web_search, code_interpreter, shell, etc.) with

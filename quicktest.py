@@ -5,6 +5,29 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+# Use the OS (Windows) certificate store so TLS works behind a corporate
+# proxy that intercepts HTTPS (otherwise MCP/SSE connections fail with
+# "CERTIFICATE_VERIFY_FAILED"). Harmless if truststore isn't installed.
+try:
+    import truststore
+
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
+# Some MCP servers (e.g. the public dmcp dice server) send a non-standard
+# "sse/connection" notification that the mcp SDK logs as a noisy validation
+# warning but otherwise ignores. Drop just that message to keep output clean.
+import logging
+
+
+class _DropMcpNotificationNoise(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Failed to validate notification" not in record.getMessage()
+
+
+logging.getLogger().addFilter(_DropMcpNotificationNoise())
+
 
 GEMINI_SERVICE_ACCOUNT = os.getenv("GEMINI_SERVICE_ACCOUNT", "")  # ← path to .json
 # If no env var, prefer a local file named `gemini-sa.json` next to this script
@@ -184,7 +207,7 @@ async def test_web_search(client: AsyncClient, model: str, provider_label: str):
     response = await client.responses.create(
         model=model,
         input=(
-            "what is the temperature in mumbai right now?"
+            "what is the temperature in mumbai right now? what is the time now"
         ),
         tools=[{"type": "web_search"}],
         max_output_tokens=2000,
@@ -224,6 +247,42 @@ async def test_web_search(client: AsyncClient, model: str, provider_label: str):
     else:
         # Model may answer from parametric knowledge without grounding
         print("  ⚠️  No grounding metadata returned (model answered directly) — still OK")
+
+
+async def test_mcp(client: AsyncClient, model: str, provider_label: str):
+    """Test 8: MCP — Gemini connects to a public MCP server (dice roller),
+    the client discovers its tools, and the agent loop calls one directly."""
+    print(f"\n{'='*55}")
+    print(f"  TEST 8 — MCP (dice roller)  [{provider_label} / {model}]")
+    print(f"{'='*55}")
+
+    response = await client.responses.create(
+        model=model,
+        input="Roll 2d6 using the dice tool and tell me the result.",
+        tools=[{
+            "type": "mcp",
+            "server_label": "dmcp",
+            "server_url": "https://dmcp-server.deno.dev/sse",
+        }],
+        max_output_tokens=2000,
+    )
+
+    print(f"  Status      : {response.status}")
+    print(f"  Answer      : {response.output_text}")
+
+    mcp_calls = [
+        item for item in response.output
+        if _item_attr(item, "type") == "mcp_call"
+    ]
+    print(f"  mcp_call items : {len(mcp_calls)}")
+    for mc in mcp_calls:
+        print(f"    • {_item_attr(mc, 'name')} -> {_item_attr(mc, 'output')}")
+
+    assert response.output_text, "Expected a non-empty answer"
+    if mcp_calls:
+        print("  ✅ PASSED — Gemini invoked an MCP tool via the agent loop")
+    else:
+        print("  ⚠️  No mcp_call surfaced (model may have answered directly) — check output")
 
 
 async def test_multi_turn(client: AsyncClient, model: str, provider_label: str):
@@ -272,6 +331,7 @@ async def run_all_tests(api_key: str, model: str, provider_label: str, extra_kwa
         test_multi_turn,
         test_tool_execution,
         test_web_search,
+        test_mcp,
     ]
 
     for test_fn in tests:

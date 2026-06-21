@@ -185,6 +185,52 @@ class TestAgentLoop:
         assert provider._call_count == 3
 
     @pytest.mark.asyncio
+    async def test_builtin_output_items_surfaced(self):
+        """Builtin handler calls surface as native output items (e.g.
+        mcp_call) prepended to the final response for API parity."""
+        from caip_responses.tool_handlers.base import BuiltinToolHandler
+        from caip_responses.tool_handlers.registry import BuiltinToolRegistry
+
+        class _StubBuiltin(BuiltinToolHandler):
+            def tool_type(self) -> str:
+                return "mcp"
+
+            def to_function_tools(self, tool_config):
+                return []
+
+            async def execute(self, name: str, arguments: dict) -> str:
+                return json.dumps({"result": "rolled 7"})
+
+            def to_output_item(self, name, arguments, result):
+                return {
+                    "type": "mcp_call",
+                    "id": "mcp_1",
+                    "name": name,
+                    "output": result,
+                    "status": "completed",
+                }
+
+        fc_resp = _fc_response("_builtin_mcp_dmcp_roll", {"sides": 6})
+        text_resp = _text_response("You rolled a 7.")
+        provider = _MockProvider([fc_resp, text_resp])
+
+        registry = BuiltinToolRegistry()
+        registry.register(_StubBuiltin())
+        loop = AgentLoop(provider, ToolExecutor(), builtin_registry=registry)
+
+        request = CreateResponseRequest(model="mock-model", input="Roll a die")
+        response = await loop.run(request)
+
+        assert response.output_text == "You rolled a 7."
+        mcp_calls = [
+            item for item in response.output
+            if (item.get("type") if isinstance(item, dict)
+                else getattr(item, "type", None)) == "mcp_call"
+        ]
+        assert len(mcp_calls) == 1
+        assert mcp_calls[0]["output"] == json.dumps({"result": "rolled 7"})
+
+    @pytest.mark.asyncio
     async def test_max_steps_exceeded(self):
         """If the model keeps calling tools, we eventually raise."""
         # Always returns a function call

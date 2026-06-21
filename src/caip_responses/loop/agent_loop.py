@@ -50,6 +50,10 @@ class AgentLoop:
         """Run the agentic loop (non-streaming) until the model is done."""
         current_input = self._ensure_input_list(request.input)
         step = 0
+        # Native output items for builtin tool calls (web_search_call,
+        # mcp_call, shell_call, ...) accumulated across steps and prepended
+        # to the final response for API parity with OpenAI.
+        builtin_items: list[dict[str, Any]] = []
 
         while step < self._max_steps:
             step += 1
@@ -60,6 +64,8 @@ class AgentLoop:
 
             # Check for function calls
             if not response.has_function_calls:
+                if builtin_items:
+                    response.output = builtin_items + list(response.output)
                 return response
 
             # Execute all function calls (two-tier dispatch)
@@ -71,7 +77,8 @@ class AgentLoop:
                 }
                 for fc in response.function_calls
             ]
-            outputs = await self._execute_function_calls(fc_items)
+            outputs, native_items = await self._execute_function_calls(fc_items)
+            builtin_items.extend(native_items)
 
             # Append the model's output items + our function call outputs to input
             current_input.extend(self._response_output_to_input(response))
@@ -110,8 +117,10 @@ class AgentLoop:
             if not fc_items:
                 return  # No function calls → model is done
 
-            # Execute function calls (two-tier dispatch)
-            outputs = await self._execute_function_calls(fc_items)
+            # Execute function calls (two-tier dispatch). Native output
+            # items aren't surfaced as stream events yet (streaming parity
+            # for builtin tool calls is a separate concern).
+            outputs, _native_items = await self._execute_function_calls(fc_items)
 
             # Build input items from the streamed response
             streamed_items = self._reconstruct_items_from_events(events)
@@ -126,16 +135,24 @@ class AgentLoop:
 
     async def _execute_function_calls(
         self, fc_items: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Execute function calls in parallel: builtin handlers and user handlers.
 
         All function calls are dispatched concurrently via asyncio.gather.
-        Results are returned in the same order as the input fc_items.
+
+        Returns a tuple of:
+        - outputs: ``function_call_output`` items (in fc_items order) fed
+          back to the provider on the next step.
+        - native_items: native output items (e.g. ``mcp_call``,
+          ``web_search_call``) produced by builtin handlers via
+          ``to_output_item()``, for API parity in the final response.
         """
         if not fc_items:
-            return []
+            return [], []
 
-        async def _execute_single(fc: dict[str, Any]) -> dict[str, Any]:
+        async def _execute_single(
+            fc: dict[str, Any],
+        ) -> tuple[dict[str, Any], dict[str, Any] | None]:
             fn_name = fc.get("name", "")
             handler = self._builtin.resolve_for_function(fn_name)
 
@@ -145,22 +162,27 @@ class AgentLoop:
                 except json.JSONDecodeError:
                     args = {}
                 result = await handler.execute(fn_name, args)
-                return {
+                output = {
                     "type": "function_call_output",
                     "call_id": fc.get("call_id", ""),
                     "output": result,
                 }
+                native = handler.to_output_item(fn_name, args, result)
+                return output, native
             else:
-                return await self._executor.execute(
+                output = await self._executor.execute(
                     call_id=fc.get("call_id", ""),
                     name=fn_name,
                     arguments=fc.get("arguments", "{}"),
                 )
+                return output, None
 
         results = await asyncio.gather(
             *(_execute_single(fc) for fc in fc_items)
         )
-        return list(results)
+        outputs = [out for out, _ in results]
+        native_items = [native for _, native in results if native is not None]
+        return outputs, native_items
 
     # ------------------------------------------------------------------
     # Internal helpers

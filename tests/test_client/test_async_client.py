@@ -303,6 +303,59 @@ class TestAsyncClient:
         assert req.tools[0]["server_description"] == "A D&D MCP server for dice rolling and character management."
 
     @pytest.mark.asyncio
+    async def test_mcp_discovery_prepass_for_non_openai(self):
+        """For a provider that doesn't support MCP natively, the client
+        discovers the server's tools and exposes each as a synthetic
+        function the agent loop can call directly."""
+        from unittest.mock import AsyncMock
+
+        class GeminiLikeProvider(MockProvider):
+            def supports_tool(self, tool_type: str) -> bool:
+                return tool_type in {"function", "web_search"}
+
+        mock_provider = GeminiLikeProvider("gemini")
+        client = AsyncClient(providers={"gemini": mock_provider})
+        client._registry.add_prefix_mapping("gemini-", "gemini")
+
+        mcp_handler = client.builtin_tools.get("mcp")
+
+        async def fake_discover(label: str, url: str):
+            mcp_handler._server_tools[label] = [
+                {
+                    "type": "function",
+                    "name": "_builtin_mcp_dmcp_roll_dice",
+                    "description": "Roll dice",
+                    "parameters": {"type": "object", "properties": {}},
+                    "_mcp_server_label": label,
+                    "_mcp_server_url": url,
+                    "_mcp_tool_name": "roll_dice",
+                }
+            ]
+            return mcp_handler._server_tools[label]
+
+        mcp_handler.discover_tools = AsyncMock(side_effect=fake_discover)
+
+        await client.responses.create(
+            model="gemini-2.5-flash",
+            input="Roll a d20",
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "dmcp",
+                    "server_url": "https://dmcp-server.deno.dev/sse",
+                },
+            ],
+        )
+
+        mcp_handler.discover_tools.assert_awaited_once_with(
+            "dmcp", "https://dmcp-server.deno.dev/sse"
+        )
+        req = mock_provider.last_request
+        assert req.tools is not None
+        names = [t.get("name") for t in req.tools]
+        assert "_builtin_mcp_dmcp_roll_dice" in names
+
+    @pytest.mark.asyncio
     async def test_custom_tool_passed_through(self):
         """Custom tool with grammar passed through to provider."""
         mock_provider = MockProvider("openai")

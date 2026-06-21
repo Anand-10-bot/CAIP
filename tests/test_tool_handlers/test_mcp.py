@@ -192,6 +192,60 @@ class TestMCPHandler:
         assert handler._find_server_url_from_configs() is None
 
     @pytest.mark.asyncio
+    async def test_with_retry_succeeds_after_transient_failure(self):
+        """Retries a transient failure then returns the successful result."""
+        handler = MCPHandler()
+        calls = {"n": 0}
+
+        async def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("transient")
+            return "ok"
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await handler._with_retry(flaky)
+
+        assert result == "ok"
+        assert calls["n"] == 3
+        # slept between the two failed attempts (attempts-1 max)
+        assert mock_sleep.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_with_retry_reraises_after_exhausting_attempts(self):
+        """Re-raises the last exception once all attempts are used up."""
+        handler = MCPHandler()
+        calls = {"n": 0}
+
+        async def always_fails():
+            calls["n"] += 1
+            raise ValueError("boom")
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(ValueError, match="boom"):
+                await handler._with_retry(always_fails, attempts=3)
+
+        assert calls["n"] == 3
+
+    @pytest.mark.asyncio
+    async def test_execute_direct_returns_legible_error_when_exhausted(self):
+        """When retries are exhausted, _execute_direct returns an unwrapped,
+        legible error rather than the opaque TaskGroup message."""
+        handler = MCPHandler()
+
+        async def fail(_factory, **_kwargs):
+            raise RuntimeError("connection closed")
+
+        with patch.object(handler, "_with_retry", side_effect=fail):
+            result = await handler._execute_direct(
+                "get_data", "https://example.com/sse", {"x": 1}
+            )
+        data = json.loads(result)
+        assert "MCP call failed" in data["error"]
+        assert "connection closed" in data["error"]
+        assert data["_source"] == "direct_mcp"
+
+    @pytest.mark.asyncio
     async def test_execute_direct_mcp_call(self):
         """Direct MCP call when tool is discovered and SDK is available."""
         handler = MCPHandler()

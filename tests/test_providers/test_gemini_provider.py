@@ -195,6 +195,41 @@ class TestGeminiTranslation:
         assert tools[0]["description"] == "Get weather"
         assert tools[0]["parameters"]["type"] == "object"
 
+    def test_translate_tools_strips_unsupported_schema_keys(self):
+        """MCP/rich schemas carry $schema & additionalProperties which the
+        Gemini SDK rejects — they must be stripped (recursively)."""
+        provider = self._make_provider()
+        tools = provider._translate_tools([
+            {
+                "type": "function",
+                "name": "_builtin_mcp_dmcp_roll",
+                "description": "Roll dice",
+                "parameters": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "properties": {
+                        "diceRollExpression": {"type": "string"},
+                        "nested": {
+                            "type": "object",
+                            "properties": {"x": {"type": "number"}},
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["diceRollExpression"],
+                    "additionalProperties": False,
+                },
+            },
+        ])
+        params = tools[0]["parameters"]
+        assert "$schema" not in params
+        assert "additionalProperties" not in params
+        # stripped recursively in nested objects too
+        assert "additionalProperties" not in params["properties"]["nested"]
+        # legitimate keys preserved
+        assert params["type"] == "object"
+        assert params["required"] == ["diceRollExpression"]
+        assert params["properties"]["diceRollExpression"]["type"] == "string"
+
     def test_translate_tool_choice_auto(self):
         provider = self._make_provider()
         assert provider._translate_tool_choice("auto") == "AUTO"

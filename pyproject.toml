@@ -38,12 +38,16 @@ anthropic = ["anthropic>=0.40,<1"]
 gemini = ["google-genai>=1.0,<2"]
 redis = ["redis[hiredis]>=5.0,<6"]
 mcp = ["mcp>=1.0,<2"]
+# Use the OS trust store for TLS — needed for MCP/SSE behind corporate
+# proxies that intercept HTTPS. Call truststore.inject_into_ssl() at startup.
+truststore = ["truststore>=0.9"]
 all = [
     "caip-responses-lib[openai]",
     "caip-responses-lib[anthropic]",
     "caip-responses-lib[gemini]",
     "caip-responses-lib[redis]",
     "caip-responses-lib[mcp]",
+    "caip-responses-lib[truststore]",
 ]
 dev = [
     "pytest>=8,<9",

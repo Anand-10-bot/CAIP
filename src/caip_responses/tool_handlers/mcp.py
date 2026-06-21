@@ -13,8 +13,11 @@ AND an OpenAI API key is configured.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any
+import logging
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 from caip_responses.tool_handlers.base import BuiltinToolHandler
 from caip_responses.tool_handlers.openai_delegator import (
@@ -22,6 +25,32 @@ from caip_responses.tool_handlers.openai_delegator import (
     OpenAIDelegatorMixin,
 )
 from caip_responses.utils.id_gen import generate_item_id
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+# MCP servers (especially public/SSE ones) drop connections or rate-limit
+# under load, surfacing as transient BrokenResourceError / 4xx / 5xx /
+# connection errors. Retry a few times with exponential backoff before
+# giving up.
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 0.5
+
+
+def _unwrap_exc(exc: BaseException) -> str:
+    """Surface the real cause from an ExceptionGroup/TaskGroup error.
+
+    The ``mcp`` SDK runs connections inside anyio task groups, so failures
+    surface as ``ExceptionGroup('unhandled errors in a TaskGroup ...')``
+    which hides the actual error (e.g. an SSL or connection failure).
+    This drills down to the first leaf exception for a legible message.
+    """
+    seen = 0
+    while getattr(exc, "exceptions", None) and seen < 10:
+        exc = exc.exceptions[0]
+        seen += 1
+    return f"{type(exc).__name__}: {exc}"
 
 
 class MCPHandler(BuiltinToolHandler, OpenAIDelegatorMixin):
@@ -82,6 +111,36 @@ class MCPHandler(BuiltinToolHandler, OpenAIDelegatorMixin):
             return True
         except ImportError:
             return False
+
+    async def _with_retry(
+        self,
+        factory: Callable[[], Awaitable[_T]],
+        *,
+        attempts: int = _RETRY_ATTEMPTS,
+        base_delay: float = _RETRY_BASE_DELAY,
+    ) -> _T:
+        """Run an MCP network operation with retry + exponential backoff.
+
+        ``factory`` must return a *fresh* coroutine on each call so the SSE
+        connection is re-established per attempt. Any exception is treated
+        as transient (these are all network/protocol operations); the last
+        one is re-raised after the final attempt.
+        """
+        last_exc: BaseException | None = None
+        for attempt in range(attempts):
+            try:
+                return await factory()
+            except Exception as e:  # noqa: BLE001 - network op; retry on any error
+                last_exc = e
+                if attempt < attempts - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "MCP operation failed (attempt %d/%d), retrying in %.1fs: %s",
+                        attempt + 1, attempts, delay, _unwrap_exc(e),
+                    )
+                    await asyncio.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
 
     @property
     def metrics(self) -> DelegatedToolMetrics:
@@ -157,29 +216,31 @@ class MCPHandler(BuiltinToolHandler, OpenAIDelegatorMixin):
         from mcp import ClientSession
         from mcp.client.sse import sse_client
 
-        tools: list[dict[str, Any]] = []
+        async def _discover() -> list[dict[str, Any]]:
+            tools: list[dict[str, Any]] = []
+            async with sse_client(url=server_url) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
 
-        async with sse_client(url=server_url) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                result = await session.list_tools()
+                    for tool in result.tools:
+                        fn_name = self._make_fn_name(f"{server_label}_{tool.name}")
+                        tool_def: dict[str, Any] = {
+                            "type": "function",
+                            "name": fn_name,
+                            "description": tool.description or f"MCP tool: {tool.name}",
+                            "parameters": tool.inputSchema if tool.inputSchema else {
+                                "type": "object",
+                                "properties": {},
+                            },
+                            "_mcp_server_label": server_label,
+                            "_mcp_server_url": server_url,
+                            "_mcp_tool_name": tool.name,
+                        }
+                        tools.append(tool_def)
+            return tools
 
-                for tool in result.tools:
-                    fn_name = self._make_fn_name(f"{server_label}_{tool.name}")
-                    tool_def: dict[str, Any] = {
-                        "type": "function",
-                        "name": fn_name,
-                        "description": tool.description or f"MCP tool: {tool.name}",
-                        "parameters": tool.inputSchema if tool.inputSchema else {
-                            "type": "object",
-                            "properties": {},
-                        },
-                        "_mcp_server_label": server_label,
-                        "_mcp_server_url": server_url,
-                        "_mcp_tool_name": tool.name,
-                    }
-                    tools.append(tool_def)
-
+        tools = await self._with_retry(_discover)
         self._server_tools[server_label] = tools
         return tools
 
@@ -224,7 +285,7 @@ class MCPHandler(BuiltinToolHandler, OpenAIDelegatorMixin):
         from mcp import ClientSession
         from mcp.client.sse import sse_client
 
-        try:
+        async def _call() -> str:
             async with sse_client(url=server_url) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -244,9 +305,11 @@ class MCPHandler(BuiltinToolHandler, OpenAIDelegatorMixin):
                         "_source": "direct_mcp",
                     })
 
+        try:
+            return await self._with_retry(_call)
         except Exception as e:
             return json.dumps({
-                "error": f"MCP call failed: {e}",
+                "error": f"MCP call failed: {_unwrap_exc(e)}",
                 "_source": "direct_mcp",
             })
 
@@ -257,7 +320,7 @@ class MCPHandler(BuiltinToolHandler, OpenAIDelegatorMixin):
         from mcp import ClientSession
         from mcp.client.sse import sse_client
 
-        try:
+        async def _list() -> str:
             async with sse_client(url=server_url) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -278,9 +341,11 @@ class MCPHandler(BuiltinToolHandler, OpenAIDelegatorMixin):
                         "_source": "direct_mcp",
                     })
 
+        try:
+            return await self._with_retry(_list)
         except Exception as e:
             return json.dumps({
-                "error": f"MCP connection failed: {e}",
+                "error": f"MCP connection failed: {_unwrap_exc(e)}",
                 "_source": "direct_mcp",
             })
 
@@ -348,6 +413,19 @@ class MCPHandler(BuiltinToolHandler, OpenAIDelegatorMixin):
         self, tool_config: dict[str, Any]
     ) -> str | None:
         server_label = tool_config.get("server_label", "mcp_server")
+
+        # If tools were discovered for this server, point the model at the
+        # specific functions rather than the generic request function.
+        discovered = self._server_tools.get(server_label)
+        if discovered:
+            names = ", ".join(f"'{t['name']}'" for t in discovered)
+            return (
+                f"You have access to tools from an MCP (Model Context "
+                f"Protocol) server named '{server_label}'. Call the "
+                f"appropriate function ({names}) with the required "
+                f"arguments to perform actions or retrieve data."
+            )
+
         return (
             f"You have access to an MCP (Model Context Protocol) server "
             f"named '{server_label}'. You can call the "
