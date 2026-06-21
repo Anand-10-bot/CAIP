@@ -47,9 +47,11 @@ class TestWebSearchHandler:
         ]
 
         async def mock_search(query: str, num_results: int) -> list[dict]:
+            assert num_results == 5
             return results_returned
 
         handler = WebSearchHandler(search_callback=mock_search)
+        handler.to_function_tools({"type": "web_search", "search_context_size": "medium"})
         result = await handler.execute(
             "_builtin_web_search_query", {"query": "test search"}
         )
@@ -59,6 +61,24 @@ class TestWebSearchHandler:
         assert data["results"][0]["title"] == "Test"
         # No usage tracked for custom callbacks
         assert "_usage" not in data
+
+    @pytest.mark.asyncio
+    async def test_execute_respects_search_context_size(self):
+        """The web search handler should honor the tool's search_context_size."""
+
+        async def mock_search(query: str, num_results: int) -> list[dict]:
+            assert num_results == 10
+            return [
+                {"title": "Result", "url": "https://example.com", "snippet": "Outcome."}
+            ]
+
+        handler = WebSearchHandler(search_callback=mock_search)
+        handler.to_function_tools({"type": "web_search", "search_context_size": "high"})
+        result = await handler.execute(
+            "_builtin_web_search_query", {"query": "important topic"}
+        )
+        data = json.loads(result)
+        assert data["query"] == "important topic"
 
     @pytest.mark.asyncio
     async def test_execute_empty_results(self):

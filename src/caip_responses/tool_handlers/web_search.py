@@ -115,6 +115,7 @@ class WebSearchHandler(BuiltinToolHandler):
         self._openai_model = openai_model
         self._search_callback = search_callback
         self._metrics = WebSearchMetrics()
+        self._tool_config: dict[str, Any] | None = None
         # Lazily initialized OpenAI client
         self._openai_client: Any = None
 
@@ -140,6 +141,7 @@ class WebSearchHandler(BuiltinToolHandler):
     def to_function_tools(
         self, tool_config: dict[str, Any]
     ) -> list[dict[str, Any]]:
+        self._tool_config = tool_config
         return [
             {
                 "type": "function",
@@ -170,7 +172,8 @@ class WebSearchHandler(BuiltinToolHandler):
         if not query:
             return json.dumps({"error": "No query provided"})
 
-        num_results = _CONTEXT_SIZE_MAP.get("medium", 5)
+        search_size = self._tool_config.get("search_context_size") if self._tool_config else "medium"
+        num_results = _CONTEXT_SIZE_MAP.get(search_size, 5)
         results, usage = await self._do_search(query, num_results)
 
         # Track the usage

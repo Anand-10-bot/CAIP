@@ -184,8 +184,7 @@ async def test_web_search(client: AsyncClient, model: str, provider_label: str):
     response = await client.responses.create(
         model=model,
         input=(
-            "Use web search to find out: who won the most recent Formula 1 "
-            "race, and on what date? Answer in one sentence."
+            "what is the temperature in mumbai right now?"
         ),
         tools=[{"type": "web_search"}],
         max_output_tokens=2000,
